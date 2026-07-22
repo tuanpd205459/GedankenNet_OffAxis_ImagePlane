@@ -30,7 +30,11 @@ model_candidates = glob.glob('Models/**/final_model.pth', recursive=True) + \
 if len(model_candidates) > 0:
     model_filepath = model_candidates[0]
     print(f"Found trained model: {model_filepath}")
-    model = torch.load(model_filepath, map_location=device)
+    try:
+        model = torch.load(model_filepath, map_location=device, weights_only=False)
+    except TypeError:
+        # Fallback for older PyTorch versions where weights_only argument doesn't exist
+        model = torch.load(model_filepath, map_location=device)
     model.eval()
 else:
     print(f"[Warning] No trained model found in 'Models/'. Initializing untrained model structure.")
