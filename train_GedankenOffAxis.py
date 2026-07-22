@@ -16,7 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from utilities import count_params, device
 from networks.fno import FNO2d
-from my_tools_offaxis import batch_forward_direct, RealHoloTrainDataset, GedankenOffAxisDataset
+from my_tools_offaxis import batch_forward_direct, RealHoloTrainDataset
 import np_transforms
 from Adam import Adam
 
@@ -27,10 +27,7 @@ np.random.seed(0)
 # CONFIGURATIONS
 # ==============================================================
 RAW_DIR = 'data_raw'
-TRAIN_PATH = 'data/train'
-
 os.makedirs(RAW_DIR, exist_ok=True)
-os.makedirs(TRAIN_PATH, exist_ok=True)
 
 S = 512  # Patch crop size (512x512)
 modes = 256
@@ -71,32 +68,22 @@ def tv_loss(inputs):
 def main():
     print(f"Initializing GedankenNet Training on Real Experimental Data on {device}...")
 
-    # Check for real BMP hologram pairs in data_raw
     bmp_files = glob.glob(os.path.join(RAW_DIR, '*.bmp')) + glob.glob(os.path.join(RAW_DIR, '*.png'))
 
     if len(bmp_files) >= 2:
         print(f"Found {len(bmp_files)} real image files in '{RAW_DIR}'. Training directly on REAL experimental holograms!")
-        train_dataset = RealHoloTrainDataset(
-            RAW_DIR,
-            trans=np_transforms.Compose([
-                np_transforms.RandomCrop(S),
-                np_transforms.RandomHorizontalFlip(),
-                np_transforms.ToTensor()
-            ])
-        )
     else:
-        print(f"[Notice] Less than 2 real images found in '{RAW_DIR}'. Falling back to synthetic training mode.")
-        train_file_paths = glob.glob(os.path.join(TRAIN_PATH, '*.png')) + glob.glob(os.path.join(TRAIN_PATH, '*.bmp'))
-        train_dataset = GedankenOffAxisDataset(
-            train_file_paths, angles_list,
-            trans=np_transforms.Compose([
-                np_transforms.RandomCrop(S),
-                np_transforms.RandomHorizontalFlip(),
-                np_transforms.ToTensor()
-            ]),
-            params=params,
-            num_samples=500
-        )
+        print(f"[Notice] '{RAW_DIR}' contains {len(bmp_files)} images. Generating dynamic synthetic phase objects until real BMP images are uploaded.")
+
+    train_dataset = RealHoloTrainDataset(
+        RAW_DIR,
+        trans=np_transforms.Compose([
+            np_transforms.RandomCrop(S),
+            np_transforms.RandomHorizontalFlip(),
+            np_transforms.ToTensor()
+        ]),
+        default_num_samples=500
+    )
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
 
@@ -125,10 +112,8 @@ def main():
         optimizer.load_state_dict(checkpoint['optimizer'])
         model.load_state_dict(checkpoint['model'])
 
-    # Batch angle tensor
     angles_batch_tensor = [angles_list for _ in range(batch_size)]
 
-    # Training Loop directly on Real Experimental Holograms
     for ep in range(start_ep + 1, epochs):
         model.train()
         t1 = default_timer()
@@ -139,22 +124,17 @@ def main():
                 break
 
             if isinstance(batch, (list, tuple)):
-                xx = batch[0]  # Real holograms [N, 2, H, W]
+                xx = batch[0]
             else:
                 xx = batch
 
             xx = xx.to(device)
-            # Normalize real input holograms by mean intensity
             xx_norm = xx / torch.mean(xx, dim=(2, 3), keepdim=True)
 
-            # Predict phase map from real holograms
-            pred_ph, _ = model(xx_norm)  # [N, 1, H, W]
+            pred_ph, _ = model(xx_norm)
 
-            # Re-simulate holograms via Direct Physics Forward Model
-            im_x = batch_forward_direct(pred_ph, angles_batch_tensor, params)  # [N, 2, H, W]
+            im_x = batch_forward_direct(pred_ph, angles_batch_tensor, params)
 
-            # Self-Supervised Physics Consistency Loss:
-            # Match simulated holograms im_x with real input holograms xx_norm
             loss = 0.0
             loss += maeloss(torch.fft.fft2(im_x) * hann_window, torch.fft.fft2(xx_norm) * hann_window) * 0.1
             loss += maeloss(im_x, xx_norm) * 10.0 + tv_loss(pred_ph) * 5.0

@@ -8,50 +8,70 @@ def _is_numpy_image(img):
     return isinstance(img, np.ndarray)
 
 class RandomCrop(object):
+    """
+    Performs a random crop on a numpy array [H, W, C].
+    Pads automatically if image dimensions are smaller than crop size.
+    """
     def __init__(self, size):
         if isinstance(size, numbers.Number):
             self.size = (int(size), int(size))
         else:
             self.size = size
 
-    @staticmethod
-    def get_params(pic, output_size):
-        w, h = pic.shape[:2]
-        th, tw = output_size
-        i = random.randint(0, w - tw)
-        j = random.randint(0, h - th)
-        return i, j, th, tw
-
     def __call__(self, pic):
         if not _is_numpy_image(pic):
             raise TypeError('img should be numpy array. Got {}'.format(type(pic)))
         if len(pic.shape) != 3:
             pic = pic.reshape(pic.shape[0], pic.shape[1], -1)
-        i, j, th, tw = self.get_params(pic, self.size)
+
+        h, w = pic.shape[:2]
+        th, tw = self.size
+
+        # Pad image if smaller than crop dimensions
+        if h < th or w < tw:
+            pad_h = max(0, th - h)
+            pad_w = max(0, tw - w)
+            pic = np.pad(pic, ((0, pad_h), (0, pad_w), (0, 0)), mode='edge')
+            h, w = pic.shape[:2]
+
+        max_i = max(0, h - th)
+        max_j = max(0, w - tw)
+
+        i = random.randint(0, max_i) if max_i > 0 else 0
+        j = random.randint(0, max_j) if max_j > 0 else 0
+
         return pic[i:i + th, j:j + tw, ...]
 
 class CenterCrop(object):
+    """
+    Crops the center of a numpy array [H, W, C].
+    Pads automatically if image dimensions are smaller than crop size.
+    """
     def __init__(self, size):
         if isinstance(size, numbers.Number):
             self.size = (int(size), int(size))
         else:
             self.size = size
 
-    @staticmethod
-    def get_params(pic, output_size):
-        h, w = pic.shape[:2]
-        th, tw = output_size
-        i = int(round((h - th) / 2.))
-        j = int(round((w - tw) / 2.))
-        return i, j, th, tw
-
     def __call__(self, pic):
         if not _is_numpy_image(pic):
             raise TypeError('img should be numpy array. Got {}'.format(type(pic)))
         if len(pic.shape) != 3:
             pic = pic.reshape(pic.shape[0], pic.shape[1], -1)
-        i, j, h, w = self.get_params(pic, self.size)
-        return pic[i:i + h, j:j + w, :]
+
+        h, w = pic.shape[:2]
+        th, tw = self.size
+
+        if h < th or w < tw:
+            pad_h = max(0, th - h)
+            pad_w = max(0, tw - w)
+            pic = np.pad(pic, ((0, pad_h), (0, pad_w), (0, 0)), mode='edge')
+            h, w = pic.shape[:2]
+
+        i = max(0, int(round((h - th) / 2.)))
+        j = max(0, int(round((w - tw) / 2.)))
+
+        return pic[i:i + th, j:j + tw, ...]
 
 class RandomHorizontalFlip(object):
     def __init__(self, prob=0.5):
