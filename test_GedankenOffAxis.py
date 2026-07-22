@@ -1,0 +1,71 @@
+###############################################################
+#  Test / Inference Script for Direct Off-Axis Holograms (.bmp)
+#  Reads real BMP images from folder /data_raw
+###############################################################
+
+import os
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+
+import torch
+import numpy as np
+import PIL.Image
+import matplotlib.pyplot as plt
+import glob
+
+from utilities import device
+from my_tools_offaxis import HoloBmpDataset, min_max_norm
+import np_transforms
+
+RAW_DIR = 'data_raw'
+path_model = 'Models/Gedanken_DirectOffAxis_ep=10000_m=256_w=4'
+model_name = 'final_model.pth'
+path_output = os.path.join('outputs', 'Gedanken_DirectOffAxis_BMP')
+
+os.makedirs(path_output, exist_ok=True)
+os.makedirs(RAW_DIR, exist_ok=True)
+
+test_dataset = HoloBmpDataset(RAW_DIR)
+
+print(f"Loaded {len(test_dataset)} real BMP samples from '{RAW_DIR}'.")
+
+if len(test_dataset) == 0:
+    print(f"[Notice] Place your .bmp image pairs (e.g., sample01_a0.bmp, sample01_a1.bmp) into '{RAW_DIR}'.")
+
+model_filepath = os.path.join(path_model, model_name)
+if os.path.exists(model_filepath):
+    model = torch.load(model_filepath, map_location=device)
+    model.eval()
+    print(f"Loaded model successfully from {model_filepath}")
+else:
+    print(f"[Warning] Model file not found at {model_filepath}. Initializing untrained model structure for demonstration.")
+    from networks.fno import FNO2d
+    model = FNO2d(modes=256, width=4, in_channel=2, out_channel=1).to(device)
+    model.eval()
+
+with torch.no_grad():
+    for i in range(len(test_dataset)):
+        xx, sample_name = test_dataset[i]
+        xx = xx.unsqueeze(0).to(device)  # [1, 2, H, W]
+
+        # Mean normalization across spatial dimensions
+        xx_norm = xx / torch.mean(xx, dim=(2, 3), keepdim=True)
+
+        # Predict phase map
+        pred_ph, _ = model(xx_norm)  # [1, 1, H, W]
+
+        xx_np = xx.cpu().numpy().squeeze()
+        pred_np = pred_ph.cpu().numpy().squeeze()
+
+        # Min-max normalization for output phase visualization
+        pred_visual = min_max_norm(pred_np - pred_np.mean())
+
+        # Save input holograms and output reconstructed phase
+        plt.imsave(os.path.join(path_output, f"{sample_name}_input_angle0.bmp"), min_max_norm(xx_np[0]), cmap='gray')
+        plt.imsave(os.path.join(path_output, f"{sample_name}_input_angle1.bmp"), min_max_norm(xx_np[1]), cmap='gray')
+        plt.imsave(os.path.join(path_output, f"{sample_name}_reconstructed_phase.bmp"), pred_visual, cmap='gray')
+        plt.imsave(os.path.join(path_output, f"{sample_name}_reconstructed_phase_color.jpg"), pred_visual, cmap='viridis')
+
+        print(f"[{i+1}/{len(test_dataset)}] Processed: {sample_name} -> Saved to {path_output}")
+
+print("Inference finished!")
