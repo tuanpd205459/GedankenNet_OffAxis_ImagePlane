@@ -1,6 +1,6 @@
 ###############################################################
-#  GedankenNet-Phase: Self-Supervised Training on Real BMP Data
-#  Directly trains FNO2d using Real Holograms in /data_raw
+#  GedankenNet-Phase: Fast Test Run (10 Epochs Test)
+#  Self-Supervised Training on Real BMP Data
 ###############################################################
 
 import os
@@ -24,7 +24,7 @@ torch.manual_seed(0)
 np.random.seed(0)
 
 # ==============================================================
-# CONFIGURATIONS
+# CONFIGURATIONS FOR FAST TEST RUN (10 EPOCHS)
 # ==============================================================
 RAW_DIR = 'data_raw'
 os.makedirs(RAW_DIR, exist_ok=True)
@@ -34,8 +34,8 @@ modes = 256
 width = 4
 
 batch_size = 1
-epochs = 1000
-batch_per_ep = 100
+epochs = 10       # SET TO 10 EPOCHS FOR FAST CONVERGENCE TEST
+batch_per_ep = 50  # 50 batches per epoch for quick verification
 learning_rate = 0.0001
 
 params = {
@@ -66,7 +66,7 @@ def tv_loss(inputs):
 
 
 def main():
-    print(f"Initializing GedankenNet Training on Real Experimental Data on {device}...")
+    print(f"--- Fast Test Run: Training for {epochs} Epochs on {device} ---")
 
     bmp_files = glob.glob(os.path.join(RAW_DIR, '*.bmp')) + glob.glob(os.path.join(RAW_DIR, '*.png'))
 
@@ -103,18 +103,9 @@ def main():
     hann_window = torch.outer(torch.hann_window(S), torch.hann_window(S))
     hann_window = torch.fft.ifftshift(hann_window).unsqueeze(0).unsqueeze(0).to(device)
 
-    start_ep = -1
-    checkpoint_path = os.path.join(path_model, "checkpoint.pth")
-    if os.path.isfile(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        start_ep = checkpoint['epoch']
-        print(f"Resuming checkpoint from epoch {start_ep + 1}")
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        model.load_state_dict(checkpoint['model'])
-
     angles_batch_tensor = [angles_list for _ in range(batch_size)]
 
-    for ep in range(start_ep + 1, epochs):
+    for ep in range(epochs):
         model.train()
         t1 = default_timer()
         train_loss_epoch = 0.0
@@ -146,23 +137,17 @@ def main():
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
-        writer.add_scalar('Loss/Train_Real', train_loss_epoch / (i + 1), ep)
+        avg_loss = train_loss_epoch / (i + 1)
+        writer.add_scalar('Loss/Train_Real', avg_loss, ep)
 
-        if (ep + 1) % 50 == 0 or ep == epochs - 1:
-            torch.save(model, os.path.join(path_model, "final_model.pth"))
-            torch.save({
-                'epoch': ep,
-                'model': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'scheduler': scheduler.state_dict(),
-            }, checkpoint_path)
+        # Save checkpoint & final model periodically
+        torch.save(model, os.path.join(path_model, "final_model.pth"))
 
         scheduler.step()
         t2 = default_timer()
-        print(f"Epoch [{ep+1}/{epochs}] Time: {t2 - t1:.2f}s | Real Physics Consistency Loss: {train_loss_epoch / (i + 1):.4f}")
+        print(f"Epoch [{ep+1}/{epochs}] Time: {t2 - t1:.2f}s | Physics Loss: {avg_loss:.4f}")
 
-    torch.save(model, os.path.join(path_model, "final_model.pth"))
-    print("Training on Real Data Completed!")
+    print("Fast Test Run (10 Epochs) Completed! You can now run 'python test_GedankenOffAxis.py' to inspect results.")
 
 
 if __name__ == '__main__':
