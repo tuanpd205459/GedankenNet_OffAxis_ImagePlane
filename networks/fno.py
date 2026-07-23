@@ -56,24 +56,27 @@ class SpectralConv2d_fast(nn.Module):
         self.weights2 = nn.Parameter(self.scale * torch.randn(1, out_channels, self.modes1, self.modes2, dtype=torch.cfloat))
 
     def compl_mul2d(self, input, weights):
-        return torch.einsum("bixy,ioxy->boxy", input, weights)
+        return input * weights
 
     def forward(self, x):
         batchsize = x.shape[0]
         x_ft = torch.fft.rfft2(x)
 
-        factor = x_ft.abs()
-        factor = torch.cat((factor[:, :, :self.modes1, :self.modes2], factor[:, :, -self.modes1:, :self.modes2]), dim=2)
+        factor = torch.cat((x_ft.abs()[:, :, :self.modes1, :self.modes2], x_ft.abs()[:, :, -self.modes1:, :self.modes2]), dim=2)
         factor, gap = self.unet(factor)
-        
-        # Fixed batchsize handling in reshape to support batch_size > 1
-        factor = factor.reshape((2, batchsize, x_ft.shape[1], self.modes1 * 2, self.modes2))
+
+        # Robust batch size handling for factor reshape
+        factor = factor.reshape((batchsize, 2, x_ft.shape[1], self.modes1 * 2, self.modes2)).permute(1, 0, 2, 3, 4)
 
         out_ft = torch.zeros(batchsize, self.out_channels, x.size(-2), x.size(-1) // 2 + 1, dtype=torch.cfloat, device=x.device)
+
+        factor1_complex = torch.view_as_complex(torch.stack((factor[0][:, :, :self.modes1, :self.modes2], factor[1][:, :, :self.modes1, :self.modes2]), dim=-1))
+        factor2_complex = torch.view_as_complex(torch.stack((factor[0][:, :, -self.modes1:, :self.modes2], factor[1][:, :, -self.modes1:, :self.modes2]), dim=-1))
+
         out_ft[:, :, :self.modes1, :self.modes2] = \
-            self.compl_mul2d(x_ft[:, :, :self.modes1, :self.modes2], self.weights1.mul(torch.view_as_complex(torch.stack((factor[0][:, :, :self.modes1, :self.modes2], factor[1][:, :, :self.modes1, :self.modes2]), dim=-1))))
+            self.compl_mul2d(x_ft[:, :, :self.modes1, :self.modes2], self.weights1 * factor1_complex)
         out_ft[:, :, -self.modes1:, :self.modes2] = \
-            self.compl_mul2d(x_ft[:, :, -self.modes1:, :self.modes2], self.weights2.mul(torch.view_as_complex(torch.stack((factor[0][:, :, -self.modes1:, :self.modes2], factor[1][:, :, -self.modes1:, :self.modes2]), dim=-1))))
+            self.compl_mul2d(x_ft[:, :, -self.modes1:, :self.modes2], self.weights2 * factor2_complex)
 
         x = torch.fft.irfft2(out_ft, s=(x.size(-2), x.size(-1)))
         return x, gap
