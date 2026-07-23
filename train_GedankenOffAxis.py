@@ -34,14 +34,14 @@ S = 512  # Patch crop size (512x512)
 modes = 256
 width = 4
 
-batch_size = 1     # Set batch_size = 1 to prevent CUDA Out of Memory on 512x512 resolution
-epochs = 500
-batch_per_ep = 337
+batch_size = 8     # Set batch_size = 1 to prevent CUDA Out of Memory on 512x512 resolution
+epochs = 30
+batch_per_ep = 42
 learning_rate = 0.0001
 
 params = {
-    'wavelength': 0.530,    # um
-    'pixel_size': 0.3733,   # um
+    'wavelength': 0.6328,    # um
+    'pixel_size': 0.345,   # um
     'patch_size': S,
     'ref_ind': 1.00,
     'ph': 1.0
