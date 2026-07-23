@@ -1,6 +1,6 @@
 ###############################################################
 #  Test / Inference Script for Direct Off-Axis Holograms (.bmp)
-#  - Continuous [sin(phi), cos(phi)] Phase Reconstruction
+#  - Continuous [sin(phi), cos(phi)] Phase Reconstruction via UNetPhase
 #  - Automatic unwrap via atan2(sin, cos)
 ###############################################################
 
@@ -37,9 +37,9 @@ if len(model_candidates) > 0:
         model = torch.load(model_filepath, map_location=device)
     model.eval()
 else:
-    print(f"[Warning] No trained model found in 'Models/'. Initializing model structure.")
-    from networks.fno import FNO2d
-    model = FNO2d(modes=64, width=4, in_channel=2, out_channel=2).to(device)
+    print(f"[Warning] No trained model found in 'Models/'. Initializing UNetPhase model structure.")
+    from networks.unet_model import UNetPhase
+    model = UNetPhase(in_channels=2, out_channels=2).to(device)
     model.eval()
 
 test_dataset = HoloBmpDataset(

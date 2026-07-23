@@ -1,8 +1,9 @@
 ###############################################################
 #  GedankenNet-Phase: Self-Supervised Training on Real BMP Data
+#  - Architecture: Lightweight High-Speed U-Net (UNetPhase)
 #  - Learnable Reference Wavevectors (k1, k2)
-#  - Continuous [sin(phi), cos(phi)] Phase Representation (Anti-Wrapping)
-#  - Optimized VRAM Settings (modes = 64) for GPU Compatibility
+#  - Continuous [sin(phi), cos(phi)] Phase Representation
+#  - Super Low VRAM (< 1GB) & Extremely Fast Training
 ###############################################################
 
 import os
@@ -17,7 +18,7 @@ from timeit import default_timer
 from torch.utils.tensorboard import SummaryWriter
 
 from utilities import count_params, device
-from networks.fno import FNO2d
+from networks.unet_model import UNetPhase
 from my_tools_offaxis import LearnableDirectInterference, RealHoloTrainDataset
 import np_transforms
 from Adam import Adam
@@ -26,19 +27,16 @@ torch.manual_seed(0)
 np.random.seed(0)
 
 # ==============================================================
-# CONFIGURATIONS (VRAM Optimized for Colab GPU)
+# CONFIGURATIONS
 # ==============================================================
 RAW_DIR = 'data_raw'
 os.makedirs(RAW_DIR, exist_ok=True)
 
-S = 512         # Patch crop size (512x512)
-modes = 64      # Set modes = 64 to fit VRAM comfortably (< 3GB VRAM)
-width = 4
-
-batch_size = 1
+S = 512            # Patch crop size (512x512)
+batch_size = 4     # Smooth multi-sample batch processing (< 1GB VRAM)
 epochs = 500
-batch_per_ep = 337
-learning_rate = 0.0001
+batch_per_ep = 100
+learning_rate = 0.0002
 
 params = {
     'wavelength': 0.530,    # um
@@ -58,7 +56,7 @@ def tv_loss(inputs):
 
 
 def main():
-    print(f"--- Training with Learnable Reference Angles & Continuous (sin, cos) Phase (modes={modes}) on {device} ---")
+    print(f"--- Fast U-Net Training with Learnable Angles & (sin, cos) Phase on {device} ---")
 
     bmp_files = glob.glob(os.path.join(RAW_DIR, '*.bmp')) + glob.glob(os.path.join(RAW_DIR, '*.png'))
 
@@ -79,12 +77,15 @@ def main():
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
 
-    path_tag = f"Gedanken_RealOffAxis_ep={epochs}_m={modes}_w={width}_Learnable"
+    path_tag = f"UNet_RealOffAxis_ep={epochs}_bs={batch_size}_Learnable"
     path_model = os.path.join('Models', path_tag)
     os.makedirs(path_model, exist_ok=True)
     writer = SummaryWriter(os.path.join("runs", path_tag))
 
-    model = FNO2d(modes, width, in_channel=2, out_channel=2).to(device)
+    # Fast, Lightweight U-Net Neural Network (UNetPhase)
+    model = UNetPhase(in_channels=2, out_channels=2).to(device)
+    
+    # Physics Layer with Learnable Reference Angles
     physics_layer = LearnableDirectInterference(params).to(device)
 
     print(f"Model parameters: {count_params(model)}")
@@ -123,12 +124,16 @@ def main():
             xx = xx.to(device)
             xx_norm = xx / torch.mean(xx, dim=(2, 3), keepdim=True)
 
-            pred_sc, _ = model(xx_norm)
+            # Predict continuous [sin(phi), cos(phi)] via U-Net
+            pred_sc, _ = model(xx_norm)  # [N, 2, H, W]
 
-            im_x = physics_layer(pred_sc)
+            # Re-simulate holograms via Learnable Physics Layer
+            im_x = physics_layer(pred_sc)  # [N, 2, H, W]
 
+            # Reconstruct unwrapped phase map for TV regularization
             pred_phase = torch.atan2(pred_sc[:, 0:1, :, :], pred_sc[:, 1:2, :, :])
 
+            # Loss: Hologram Matching + Frequency Domain Matching + TV Regularization
             loss = 0.0
             loss += maeloss(torch.fft.fft2(im_x) * hann_window, torch.fft.fft2(xx_norm) * hann_window) * 0.1
             loss += maeloss(im_x, xx_norm) * 10.0 + tv_loss(pred_phase) * 5.0
@@ -163,7 +168,7 @@ def main():
 
     torch.save(model, os.path.join(path_model, "final_model.pth"))
     torch.save(physics_layer, os.path.join(path_model, "physics_layer.pth"))
-    print("Full Training Completed with Calibrated Reference Angles!")
+    print("Full U-Net Training Completed Successfully!")
 
 
 if __name__ == '__main__':
