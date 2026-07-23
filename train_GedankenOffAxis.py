@@ -25,7 +25,7 @@ torch.manual_seed(0)
 np.random.seed(0)
 
 # ==============================================================
-# CONFIGURATIONS
+# CONFIGURATIONS (Optimized for GPU VRAM)
 # ==============================================================
 RAW_DIR = 'data_raw'
 os.makedirs(RAW_DIR, exist_ok=True)
@@ -34,7 +34,7 @@ S = 512  # Patch crop size (512x512)
 modes = 256
 width = 4
 
-batch_size = 1
+batch_size = 1     # Set batch_size = 1 to prevent CUDA Out of Memory on 512x512 resolution
 epochs = 500
 batch_per_ep = 337
 learning_rate = 0.0001
@@ -49,7 +49,6 @@ params = {
 
 
 def tv_loss(inputs):
-    # Total Variation Loss on predicted phase angle
     n, c, h, w = inputs.shape
     grad_x = inputs[:, :, 1:, :] - inputs[:, :, :-1, :]
     grad_y = inputs[:, :, :, 1:] - inputs[:, :, :, :-1]
@@ -79,21 +78,17 @@ def main():
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
 
-    path_tag = f"Gedanken_RealOffAxis_ep={epochs}_m={modes}_w={width}_LearnableAngles"
+    path_tag = f"Gedanken_RealOffAxis_ep={epochs}_m={modes}_w={width}_Learnable"
     path_model = os.path.join('Models', path_tag)
     os.makedirs(path_model, exist_ok=True)
     writer = SummaryWriter(os.path.join("runs", path_tag))
 
-    # FNO2d Neural Network: out_channel = 2 (channel 0: sin(phi), channel 1: cos(phi))
     model = FNO2d(modes, width, in_channel=2, out_channel=2).to(device)
-    
-    # Physics Layer with Learnable Reference Angles (k1, k2 as nn.Parameter)
     physics_layer = LearnableDirectInterference(params).to(device)
 
     print(f"Model parameters: {count_params(model)}")
     print(f"Learnable Reference Wavevectors: k1={physics_layer.k1.data.cpu().numpy()}, k2={physics_layer.k2.data.cpu().numpy()}")
 
-    # Optimizer optimizes BOTH network parameters AND learnable reference wavevectors
     optimizer = Adam(list(model.parameters()) + list(physics_layer.parameters()), lr=learning_rate, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=2, T_mult=2)
 
@@ -127,16 +122,12 @@ def main():
             xx = xx.to(device)
             xx_norm = xx / torch.mean(xx, dim=(2, 3), keepdim=True)
 
-            # Predict continuous [sin(phi), cos(phi)] representation
-            pred_sc, _ = model(xx_norm)  # [N, 2, H, W]
+            pred_sc, _ = model(xx_norm)
 
-            # Re-simulate holograms via Learnable Physics Layer
-            im_x = physics_layer(pred_sc)  # [N, 2, H, W]
+            im_x = physics_layer(pred_sc)
 
-            # Reconstruct unwrapped phase map for TV regularization
             pred_phase = torch.atan2(pred_sc[:, 0:1, :, :], pred_sc[:, 1:2, :, :])
 
-            # Loss: Hologram Matching + Frequency Domain Matching + TV Regularization
             loss = 0.0
             loss += maeloss(torch.fft.fft2(im_x) * hann_window, torch.fft.fft2(xx_norm) * hann_window) * 0.1
             loss += maeloss(im_x, xx_norm) * 10.0 + tv_loss(pred_phase) * 5.0
@@ -151,7 +142,6 @@ def main():
         avg_loss = train_loss_epoch / (i + 1)
         writer.add_scalar('Loss/Train_Real', avg_loss, ep)
 
-        # Save checkpoint & final model periodically
         if (ep + 1) % 50 == 0 or ep == epochs - 1:
             torch.save(model, os.path.join(path_model, "final_model.pth"))
             torch.save(physics_layer, os.path.join(path_model, "physics_layer.pth"))
@@ -166,7 +156,6 @@ def main():
         scheduler.step()
         t2 = default_timer()
 
-        # Monitor learnable angles calibration
         k1_val = physics_layer.k1.data.cpu().numpy()
         k2_val = physics_layer.k2.data.cpu().numpy()
         print(f"Epoch [{ep+1}/{epochs}] Time: {t2 - t1:.2f}s | Physics Loss: {avg_loss:.4f} | Calibrated k1: [{k1_val[0]:.4f}, {k1_val[1]:.4f}] k2: [{k2_val[0]:.4f}, {k2_val[1]:.4f}]")
