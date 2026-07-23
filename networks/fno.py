@@ -65,7 +65,9 @@ class SpectralConv2d_fast(nn.Module):
         factor = x_ft.abs()
         factor = torch.cat((factor[:, :, :self.modes1, :self.modes2], factor[:, :, -self.modes1:, :self.modes2]), dim=2)
         factor, gap = self.unet(factor)
-        factor = factor.reshape((2, 1, x_ft.shape[1], self.modes1 * 2, self.modes2))
+        
+        # Fixed batchsize handling in reshape to support batch_size > 1
+        factor = factor.reshape((2, batchsize, x_ft.shape[1], self.modes1 * 2, self.modes2))
 
         out_ft = torch.zeros(batchsize, self.out_channels, x.size(-2), x.size(-1) // 2 + 1, dtype=torch.cfloat, device=x.device)
         out_ft[:, :, :self.modes1, :self.modes2] = \
