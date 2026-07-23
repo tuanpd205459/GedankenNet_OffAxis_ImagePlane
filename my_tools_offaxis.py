@@ -24,61 +24,66 @@ def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
 
 
-class DirectInterference_torch:
+class LearnableDirectInterference(nn.Module):
     """
-    Direct Off-Axis Interference / Intensity Model at Image Plane.
-    Simulates interference of object field U = exp(i * pi * ph) 
-    with reference beams R_c = exp(i * (kx_c * x + ky_c * y)).
+    Learnable Off-Axis Interference Physics Layer.
+    - Reference wavevectors (k1_x, k1_y) and (k2_x, k2_y) are learnable PyTorch nn.Parameters.
+    - Accepts continuous [sin(phi), cos(phi)] network predictions to prevent phase wrapping.
+    - Computes complex field U = (cos(phi) + i*sin(phi)) / sqrt(cos^2 + sin^2 + eps).
     """
-    def __init__(self, comp_field, params):
-        self.comp_field = comp_field  # [H, W] complex field
-        self.n_pixel = params['patch_size']
+    def __init__(self, params):
+        super().__init__()
+        self.patch_size = params['patch_size']
         self.pixel_size = params['pixel_size']
+        self.wl = params['wavelength'] / params['ref_ind']
+        k_mag = 2 * np.pi / self.wl
 
-        L = self.n_pixel * self.pixel_size
-        x_lin = np.linspace(-L / 2, L / 2, self.n_pixel, endpoint=False, dtype=np.float32)
-        y_lin = np.linspace(-L / 2, L / 2, self.n_pixel, endpoint=False, dtype=np.float32)
+        # Initial wavevector estimates (e.g. +15 deg and -15 deg)
+        init_kx1 = k_mag * np.sin(np.deg2rad(15.0))
+        init_kx2 = k_mag * np.sin(np.deg2rad(-15.0))
+
+        # Learnable reference wavevectors: k1 = [kx1, ky1], k2 = [kx2, ky2]
+        self.k1 = nn.Parameter(torch.tensor([init_kx1, 0.0], dtype=torch.float32))
+        self.k2 = nn.Parameter(torch.tensor([init_kx2, 0.0], dtype=torch.float32))
+
+        # Spatial grid [H, W]
+        L = self.patch_size * self.pixel_size
+        x_lin = np.linspace(-L / 2, L / 2, self.patch_size, endpoint=False, dtype=np.float32)
+        y_lin = np.linspace(-L / 2, L / 2, self.patch_size, endpoint=False, dtype=np.float32)
         xx, yy = np.meshgrid(x_lin, y_lin)
-        self.x = torch.from_numpy(xx).to(device)
-        self.y = torch.from_numpy(yy).to(device)
 
-    def __call__(self, angle_param):
-        kx, ky = angle_param
-        ref_beam = torch.exp(1j * (kx * self.x + ky * self.y))
-        intensity = torch.abs(self.comp_field + ref_beam) ** 2
-        return intensity
+        self.register_buffer('x', torch.from_numpy(xx))
+        self.register_buffer('y', torch.from_numpy(yy))
 
+    def forward(self, pred_sc):
+        """
+        pred_sc: [N, 2, H, W] where channel 0 = sin(phi), channel 1 = cos(phi)
+        Returns: [N, 2, H, W] simulated intensity holograms for angle 1 and angle 2
+        """
+        sin_p = pred_sc[:, 0:1, :, :]
+        cos_p = pred_sc[:, 1:2, :, :]
 
-def batch_forward_direct(batch_phase, angles_batch, params):
-    """
-    batch_phase: [N, 1, H, W] predicted phase map
-    angles_batch: list of angle parameters [(kx1, ky1), (kx2, ky2)]
-    Returns: [N, C=2, H, W] simulated intensity holograms
-    """
-    N, C_out, H, W = batch_phase.shape
-    simulated_batch = []
+        # Normalize to form unit complex field: U = (cos(phi) + i*sin(phi)) / sqrt(cos^2 + sin^2 + eps)
+        norm = torch.sqrt(sin_p ** 2 + cos_p ** 2 + 1e-8)
+        comp_field = (cos_p + 1j * sin_p) / norm  # [N, 1, H, W]
+        comp_field = comp_field.squeeze(1)       # [N, H, W]
 
-    for n in range(N):
-        ph = batch_phase[n, 0, ...]
-        comp_field = torch.exp(1j * params['ph'] * np.pi * ph)
-        forward_model = DirectInterference_torch(comp_field, params)
+        # Learnable reference beams
+        ref1 = torch.exp(1j * (self.k1[0] * self.x + self.k1[1] * self.y))  # [H, W]
+        ref2 = torch.exp(1j * (self.k2[0] * self.x + self.k2[1] * self.y))  # [H, W]
 
-        channel_imgs = []
-        for c in range(len(angles_batch[n])):
-            kx, ky = angles_batch[n][c]
-            intensity = forward_model((kx, ky))
-            channel_imgs.append(intensity)
+        # Simulated interference intensity holograms
+        H1_pred = torch.abs(comp_field + ref1) ** 2  # [N, H, W]
+        H2_pred = torch.abs(comp_field + ref2) ** 2  # [N, H, W]
 
-        simulated_batch.append(torch.stack(channel_imgs, dim=0))
-
-    return torch.stack(simulated_batch, dim=0)
+        return torch.stack([H1_pred, H2_pred], dim=1)  # [N, 2, H, W]
 
 
 class RealHoloTrainDataset(torch.utils.data.Dataset):
     """
     Dataset to train GedankenNet directly on real experimental BMP holograms from data_raw.
     Supports file pairing like sam_(1).bmp and sam_(2).bmp.
-    Includes a robust fallback generator so DataLoader NEVER fails with num_samples=0 even if data_raw is empty.
+    Includes a robust fallback generator so DataLoader NEVER fails with num_samples=0.
     """
     def __init__(self, raw_dir, trans=None, default_num_samples=500):
         self.raw_dir = raw_dir
@@ -130,7 +135,6 @@ class RealHoloTrainDataset(torch.utils.data.Dataset):
             img2 = np.array(PIL.Image.open(img_path2).convert('L')).astype('float32') / 255.0
             img_stacked = np.stack([img1, img2], axis=-1)  # [H, W, 2]
         else:
-            # Fallback dynamic synthetic hologram generator if no files uploaded yet
             s = 512
             ang = np.random.uniform(0, 1, size=(s, s)).astype('float32')
             sigma = random.uniform(8.0, 20.0)

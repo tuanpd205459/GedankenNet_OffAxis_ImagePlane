@@ -1,6 +1,7 @@
 ###############################################################
 #  GedankenNet-Phase: Self-Supervised Training on Real BMP Data
-#  Directly trains FNO2d using Real Holograms in /data_raw
+#  - Learnable Reference Wavevectors (k1, k2)
+#  - Continuous [sin(phi), cos(phi)] Phase Representation (Anti-Wrapping)
 ###############################################################
 
 import os
@@ -16,7 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from utilities import count_params, device
 from networks.fno import FNO2d
-from my_tools_offaxis import batch_forward_direct, RealHoloTrainDataset
+from my_tools_offaxis import LearnableDirectInterference, RealHoloTrainDataset
 import np_transforms
 from Adam import Adam
 
@@ -24,7 +25,7 @@ torch.manual_seed(0)
 np.random.seed(0)
 
 # ==============================================================
-# CONFIGURATIONS FOR FULL TRAINING
+# CONFIGURATIONS
 # ==============================================================
 RAW_DIR = 'data_raw'
 os.makedirs(RAW_DIR, exist_ok=True)
@@ -34,8 +35,8 @@ modes = 256
 width = 4
 
 batch_size = 1
-epochs = 500        # INCREASED TO 500 EPOCHS FOR FULL CONVERGENCE
-batch_per_ep = 337   # Run through all real images per epoch
+epochs = 500
+batch_per_ep = 337
 learning_rate = 0.0001
 
 params = {
@@ -46,18 +47,9 @@ params = {
     'ph': 1.0
 }
 
-# 2 Off-Axis Reference/Illumination Wavevectors (kx, ky) in rad/um
-wavelength = params['wavelength'] / params['ref_ind']
-k_mag = 2 * np.pi / wavelength
-theta1, theta2 = np.deg2rad(15.0), np.deg2rad(-15.0)
-
-angles_list = [
-    (k_mag * np.sin(theta1), 0.0),  # Channel 0: Angle 1
-    (k_mag * np.sin(theta2), 0.0)   # Channel 1: Angle 2
-]
-
 
 def tv_loss(inputs):
+    # Total Variation Loss on predicted phase angle
     n, c, h, w = inputs.shape
     grad_x = inputs[:, :, 1:, :] - inputs[:, :, :-1, :]
     grad_y = inputs[:, :, :, 1:] - inputs[:, :, :, :-1]
@@ -66,7 +58,7 @@ def tv_loss(inputs):
 
 
 def main():
-    print(f"--- Full Training Run: {epochs} Epochs on {device} ---")
+    print(f"--- Training with Learnable Reference Angles & Continuous (sin, cos) Representation on {device} ---")
 
     bmp_files = glob.glob(os.path.join(RAW_DIR, '*.bmp')) + glob.glob(os.path.join(RAW_DIR, '*.png'))
 
@@ -87,15 +79,22 @@ def main():
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
 
-    path_tag = f"Gedanken_RealOffAxis_ep={epochs}_m={modes}_w={width}"
+    path_tag = f"Gedanken_RealOffAxis_ep={epochs}_m={modes}_w={width}_LearnableAngles"
     path_model = os.path.join('Models', path_tag)
     os.makedirs(path_model, exist_ok=True)
     writer = SummaryWriter(os.path.join("runs", path_tag))
 
-    model = FNO2d(modes, width, in_channel=2, out_channel=1).to(device)
-    print(f"Model parameters: {count_params(model)}")
+    # FNO2d Neural Network: out_channel = 2 (channel 0: sin(phi), channel 1: cos(phi))
+    model = FNO2d(modes, width, in_channel=2, out_channel=2).to(device)
+    
+    # Physics Layer with Learnable Reference Angles (k1, k2 as nn.Parameter)
+    physics_layer = LearnableDirectInterference(params).to(device)
 
-    optimizer = Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+    print(f"Model parameters: {count_params(model)}")
+    print(f"Learnable Reference Wavevectors: k1={physics_layer.k1.data.cpu().numpy()}, k2={physics_layer.k2.data.cpu().numpy()}")
+
+    # Optimizer optimizes BOTH network parameters AND learnable reference wavevectors
+    optimizer = Adam(list(model.parameters()) + list(physics_layer.parameters()), lr=learning_rate, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=2, T_mult=2)
 
     maeloss = nn.L1Loss(reduction='mean')
@@ -111,11 +110,12 @@ def main():
         print(f"Resuming checkpoint from epoch {start_ep + 1}")
         optimizer.load_state_dict(checkpoint['optimizer'])
         model.load_state_dict(checkpoint['model'])
-
-    angles_batch_tensor = [angles_list for _ in range(batch_size)]
+        if 'physics_layer' in checkpoint:
+            physics_layer.load_state_dict(checkpoint['physics_layer'])
 
     for ep in range(start_ep + 1, epochs):
         model.train()
+        physics_layer.train()
         t1 = default_timer()
         train_loss_epoch = 0.0
 
@@ -123,48 +123,57 @@ def main():
             if i >= batch_per_ep:
                 break
 
-            if isinstance(batch, (list, tuple)):
-                xx = batch[0]
-            else:
-                xx = batch
-
+            xx = batch[0] if isinstance(batch, (list, tuple)) else batch
             xx = xx.to(device)
             xx_norm = xx / torch.mean(xx, dim=(2, 3), keepdim=True)
 
-            pred_ph, _ = model(xx_norm)
+            # Predict continuous [sin(phi), cos(phi)] representation
+            pred_sc, _ = model(xx_norm)  # [N, 2, H, W]
 
-            im_x = batch_forward_direct(pred_ph, angles_batch_tensor, params)
+            # Re-simulate holograms via Learnable Physics Layer
+            im_x = physics_layer(pred_sc)  # [N, 2, H, W]
 
+            # Reconstruct unwrapped phase map for TV regularization
+            pred_phase = torch.atan2(pred_sc[:, 0:1, :, :], pred_sc[:, 1:2, :, :])
+
+            # Loss: Hologram Matching + Frequency Domain Matching + TV Regularization
             loss = 0.0
             loss += maeloss(torch.fft.fft2(im_x) * hann_window, torch.fft.fft2(xx_norm) * hann_window) * 0.1
-            loss += maeloss(im_x, xx_norm) * 10.0 + tv_loss(pred_ph) * 5.0
+            loss += maeloss(im_x, xx_norm) * 10.0 + tv_loss(pred_phase) * 5.0
 
             train_loss_epoch += loss.item()
 
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(physics_layer.parameters()), 1.0)
             optimizer.step()
 
         avg_loss = train_loss_epoch / (i + 1)
         writer.add_scalar('Loss/Train_Real', avg_loss, ep)
 
-        # Save checkpoint & model periodically
+        # Save checkpoint & final model periodically
         if (ep + 1) % 50 == 0 or ep == epochs - 1:
             torch.save(model, os.path.join(path_model, "final_model.pth"))
+            torch.save(physics_layer, os.path.join(path_model, "physics_layer.pth"))
             torch.save({
                 'epoch': ep,
                 'model': model.state_dict(),
+                'physics_layer': physics_layer.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'scheduler': scheduler.state_dict(),
             }, checkpoint_path)
 
         scheduler.step()
         t2 = default_timer()
-        print(f"Epoch [{ep+1}/{epochs}] Time: {t2 - t1:.2f}s | Physics Loss: {avg_loss:.4f}")
+
+        # Monitor learnable angles calibration
+        k1_val = physics_layer.k1.data.cpu().numpy()
+        k2_val = physics_layer.k2.data.cpu().numpy()
+        print(f"Epoch [{ep+1}/{epochs}] Time: {t2 - t1:.2f}s | Physics Loss: {avg_loss:.4f} | Calibrated k1: [{k1_val[0]:.4f}, {k1_val[1]:.4f}] k2: [{k2_val[0]:.4f}, {k2_val[1]:.4f}]")
 
     torch.save(model, os.path.join(path_model, "final_model.pth"))
-    print("Full Training Run Completed!")
+    torch.save(physics_layer, os.path.join(path_model, "physics_layer.pth"))
+    print("Full Training Completed with Calibrated Reference Angles!")
 
 
 if __name__ == '__main__':

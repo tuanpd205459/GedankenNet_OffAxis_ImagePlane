@@ -1,6 +1,7 @@
 ###############################################################
 #  Test / Inference Script for Direct Off-Axis Holograms (.bmp)
-#  Reads real BMP images from folder /data_raw
+#  - Continuous [sin(phi), cos(phi)] Phase Reconstruction
+#  - Automatic unwrap via atan2(sin, cos)
 ###############################################################
 
 import os
@@ -33,13 +34,12 @@ if len(model_candidates) > 0:
     try:
         model = torch.load(model_filepath, map_location=device, weights_only=False)
     except TypeError:
-        # Fallback for older PyTorch versions where weights_only argument doesn't exist
         model = torch.load(model_filepath, map_location=device)
     model.eval()
 else:
-    print(f"[Warning] No trained model found in 'Models/'. Initializing untrained model structure.")
+    print(f"[Warning] No trained model found in 'Models/'. Initializing model structure.")
     from networks.fno import FNO2d
-    model = FNO2d(modes=256, width=4, in_channel=2, out_channel=1).to(device)
+    model = FNO2d(modes=256, width=4, in_channel=2, out_channel=2).to(device)
     model.eval()
 
 test_dataset = HoloBmpDataset(
@@ -60,8 +60,13 @@ with torch.no_grad():
         # Mean normalization across spatial dimensions
         xx_norm = xx / torch.mean(xx, dim=(2, 3), keepdim=True)
 
-        # Predict phase map
-        pred_ph, _ = model(xx_norm)  # [1, 1, H, W]
+        # Predict continuous [sin(phi), cos(phi)] representation
+        pred_sc, _ = model(xx_norm)  # [1, 2, H, W]
+
+        # Recover continuous unwrapped phase map: phi = atan2(sin, cos)
+        sin_p = pred_sc[:, 0:1, :, :]
+        cos_p = pred_sc[:, 1:2, :, :]
+        pred_ph = torch.atan2(sin_p, cos_p)  # [1, 1, H, W]
 
         xx_np = xx.cpu().numpy().squeeze()
         pred_np = pred_ph.cpu().numpy().squeeze()
@@ -69,10 +74,10 @@ with torch.no_grad():
         # Min-max normalization for output phase visualization
         pred_visual = min_max_norm(pred_np - pred_np.mean())
 
-        # Save output reconstructed phase and holograms
+        # Save output reconstructed phase maps
         plt.imsave(os.path.join(path_output, f"{sample_name}_reconstructed_phase.bmp"), pred_visual, cmap='gray')
         plt.imsave(os.path.join(path_output, f"{sample_name}_reconstructed_phase_color.jpg"), pred_visual, cmap='viridis')
 
         print(f"[{i+1}/{len(test_dataset)}] Processed: {sample_name} -> Saved to {path_output}")
 
-print(f"Inference finished! Results saved in '{path_output}'")
+print(f"Inference finished! Unwrapped phase results saved in '{path_output}'")
