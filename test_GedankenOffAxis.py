@@ -39,7 +39,7 @@ if len(model_candidates) > 0:
 else:
     print(f"[Warning] No trained model found in 'Models/'. Initializing model structure.")
     from networks.fno import FNO2d
-    model = FNO2d(modes=256, width=4, in_channel=2, out_channel=2).to(device)
+    model = FNO2d(modes=64, width=4, in_channel=2, out_channel=2).to(device)
     model.eval()
 
 test_dataset = HoloBmpDataset(

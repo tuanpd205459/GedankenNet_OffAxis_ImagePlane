@@ -2,6 +2,7 @@
 #  GedankenNet-Phase: Self-Supervised Training on Real BMP Data
 #  - Learnable Reference Wavevectors (k1, k2)
 #  - Continuous [sin(phi), cos(phi)] Phase Representation (Anti-Wrapping)
+#  - Optimized VRAM Settings (modes = 64) for GPU Compatibility
 ###############################################################
 
 import os
@@ -25,23 +26,23 @@ torch.manual_seed(0)
 np.random.seed(0)
 
 # ==============================================================
-# CONFIGURATIONS (Optimized for GPU VRAM)
+# CONFIGURATIONS (VRAM Optimized for Colab GPU)
 # ==============================================================
 RAW_DIR = 'data_raw'
 os.makedirs(RAW_DIR, exist_ok=True)
 
-S = 512  # Patch crop size (512x512)
-modes = 256
+S = 512         # Patch crop size (512x512)
+modes = 64      # Set modes = 64 to fit VRAM comfortably (< 3GB VRAM)
 width = 4
 
-batch_size = 8     # Set batch_size = 1 to prevent CUDA Out of Memory on 512x512 resolution
-epochs = 30
-batch_per_ep = 42
+batch_size = 1
+epochs = 500
+batch_per_ep = 337
 learning_rate = 0.0001
 
 params = {
-    'wavelength': 0.6328,    # um
-    'pixel_size': 0.345,   # um
+    'wavelength': 0.530,    # um
+    'pixel_size': 0.3733,   # um
     'patch_size': S,
     'ref_ind': 1.00,
     'ph': 1.0
@@ -57,7 +58,7 @@ def tv_loss(inputs):
 
 
 def main():
-    print(f"--- Training with Learnable Reference Angles & Continuous (sin, cos) Representation on {device} ---")
+    print(f"--- Training with Learnable Reference Angles & Continuous (sin, cos) Phase (modes={modes}) on {device} ---")
 
     bmp_files = glob.glob(os.path.join(RAW_DIR, '*.bmp')) + glob.glob(os.path.join(RAW_DIR, '*.png'))
 
